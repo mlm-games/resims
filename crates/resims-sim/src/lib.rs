@@ -158,8 +158,8 @@ fn room_function_for(kind: FurnitureKind) -> RoomFunction {
 /// Household money, earned by [`AgentState::Working`] agents.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Funds(pub Money);
-/// City treasury, filled by the nightly tax tick (Micropolis budget in
-/// miniature: rate x capacity x development per building per day).
+/// City treasury, filled by the nightly budget settle (Micropolis
+/// budget in miniature: property + wage tax in, services out).
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Treasury(pub Money);
 
@@ -167,8 +167,58 @@ pub struct Treasury(pub Money);
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DayCount(pub u32);
 
-/// Tax funds per capacity per day at full development.
-pub const TAX_PER_CAP_DAY: f32 = 5.0;
+/// RCI demand (-1..=1 per axis), recomputed every night from live city
+/// state (Micropolis valves in miniature, no tile grid):
+/// * Residential = unhoused share − housed share (need beds vs glut);
+/// * Industrial = unemployed share − employed share (want jobs vs glut);
+/// * Commercial = unmet fun/comfort (want services vs satiation).
+/// Zone development below is gated on the matching axis: build where
+/// demand is high, overzoning decays (vacancy) even with road access.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Demand {
+    pub residential: f32,
+    pub commercial: f32,
+    pub industrial: f32,
+}
+
+/// Property/wage tax rate (0..=0.25, default 10%). Scales property tax
+/// income and the wage cut; high rates slow development (growth penalty).
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct TaxRate(pub f32);
+
+impl Default for TaxRate {
+    fn default() -> Self {
+        Self(DEFAULT_TAX_RATE)
+    }
+}
+
+pub const DEFAULT_TAX_RATE: f32 = 0.10;
+pub const MAX_TAX_RATE: f32 = 0.25;
+/// Starting treasury in cents ($200 runway): new zones cost services
+/// before they pay tax, so a city must bootstrap from something.
+pub const STARTING_TREASURY_CENTS: i64 = 20_000;
+/// Property tax base: rate x base x capacity x development per day
+/// (10% of 50 = 5.0, preserving the old flat rate at the default).
+pub const TAX_BASE_PER_CAP_DAY: f32 = 50.0;
+/// City services upkeep per capacity per day, charged on every zoned
+/// building whether developed or not: empty sprawl bleeds the treasury.
+pub const SERVICES_PER_CAP_DAY: f32 = 2.0;
+
+/// Last settled day's budget figures (dollars): property tax in, wage
+/// tax in, services out. `wage_in` accumulates live during the day and
+/// is moved into the treasury at the nightly settle.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ledger {
+    pub property_in: f32,
+    pub wage_in: f32,
+    pub services_out: f32,
+}
+
+impl Ledger {
+    pub fn net(&self) -> f32 {
+        self.property_in + self.wage_in - self.services_out
+    }
+}
 
 /// Zoning function stamped onto a building by Implement (Micropolis
 /// zones in miniature: function + development level, no tile grid).
@@ -275,8 +325,16 @@ fn point_seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 
 /// Zone development (Micropolis doRes/doCom/doInd in miniature):
 /// buildings with road access develop toward 1, isolated ones decay.
+/// Growth is gated on RCI demand: the matching axis scales the rate
+/// (2x at full demand), deep negative demand means vacancy — decay even
+/// with road access. A negative treasury stalls all growth (unfunded
+/// services); high taxes slow it. Other functions develop neutrally.
 fn develop_buildings(world: &mut World, dt: f32) {
     let roads = world.get_resource::<Roads>().map(|r| r.0.clone()).unwrap_or_default();
+    let demand = world.get_resource::<Demand>().copied().unwrap_or_default();
+    let tax_rate = world.get_resource::<TaxRate>().map(|t| t.0).unwrap_or(DEFAULT_TAX_RATE);
+    let deficit = world.get_resource::<Treasury>().is_some_and(|t| t.0.cents < 0);
+    let tax_mult = (1.0 - (tax_rate - DEFAULT_TAX_RATE) * 2.0).max(0.2);
     let mut query = world.query::<&mut CityBuilding>();
     for mut b in query.iter_mut(world) {
         let probes = [
@@ -297,8 +355,14 @@ fn develop_buildings(world: &mut World, dt: f32) {
                 }
             }
         }
-        if access {
-            b.development = (b.development + DEVELOP_RATE * dt).min(1.0);
+        let axis = match b.function {
+            ZoneFunction::Residential => demand.residential,
+            ZoneFunction::Commercial => demand.commercial,
+            ZoneFunction::Industrial => demand.industrial,
+            _ => 0.0,
+        };
+        if access && !deficit && axis >= -0.3 {
+            b.development = (b.development + DEVELOP_RATE * (1.0 + axis) * tax_mult * dt).min(1.0);
         } else {
             b.development = (b.development - NEGLECT_RATE * dt).max(0.0);
         }
@@ -550,7 +614,7 @@ const ROAD_HALF_WIDTH: f32 = 2.0;
 
 /// Snapshot format version. Bump when [`SimSnapshot`] changes shape;
 /// [`Sim::load_json`] rejects anything else.
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// Serializable sim snapshot. Entity identities are NOT preserved
 /// (claims/queues/targets reference live entities); see [`Sim::restore`].
@@ -569,6 +633,7 @@ pub struct SimSnapshot {
     pub day: u32,
     pub funds: i64,
     pub treasury: i64,
+    pub tax_rate: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1009,8 +1074,11 @@ impl Sim {
         world.init_resource::<Obstacles>();
         world.insert_resource(HourOfDay(8)); // start in the morning
         world.insert_resource(Funds(Money::default()));
-        world.insert_resource(Treasury(Money::default()));
+        world.insert_resource(Treasury(Money { cents: STARTING_TREASURY_CENTS, frac: 0.0 }));
         world.insert_resource(DayCount(0));
+        world.insert_resource(Demand::default());
+        world.insert_resource(TaxRate::default());
+        world.insert_resource(Ledger::default());
         world.init_resource::<SimRng>();
         world.init_resource::<Roads>();
         world.init_resource::<Walls>();
@@ -1274,7 +1342,9 @@ impl Sim {
 
     /// Set the hour of day (wraps into 0..23). The UI clock feeds this
     /// every frame; night hours let idle agents doze (regain energy).
-    /// A wrap past midnight advances the day and collects taxes.
+    /// A wrap past midnight advances the day and settles the city:
+    /// RCI demand is recomputed, then the budget (property + wage tax
+    /// in, services out) moves through the treasury.
     pub fn set_hour(&mut self, hour: u8) {
         let hour = hour % 24;
         let old = self.world.get_resource::<HourOfDay>().map(|h| h.0).unwrap_or(hour);
@@ -1283,25 +1353,83 @@ impl Sim {
             if let Some(mut d) = self.world.get_resource_mut::<DayCount>() {
                 d.0 += 1;
             }
-            self.collect_taxes();
+            self.settle_night();
         }
     }
 
-    /// Nightly tax tick: every developed building pays rate x capacity
-    /// x development into the treasury.
-    fn collect_taxes(&mut self) {
-        let mut due = 0.0;
+    /// Nightly RCI recompute from live city state (see [`Demand`]).
+    /// Empty cities hold neutral demand.
+    fn recompute_demand(&mut self) {
+        let mut pop = 0u32;
+        let mut housed = 0u32;
+        let mut employed = 0u32;
+        let mut fun_sum = 0.0;
+        let mut comfort_sum = 0.0;
+        {
+            let mut q = self.world.query::<(&Needs, Option<&Home>, Option<&Employment>)>();
+            for (n, home, emp) in q.iter(&self.world) {
+                pop += 1;
+                housed += home.is_some() as u32;
+                employed += emp.is_some() as u32;
+                fun_sum += n.fun;
+                comfort_sum += n.comfort;
+            }
+        }
+        let d = if pop == 0 {
+            Demand::default()
+        } else {
+            let p = pop as f32;
+            Demand {
+                residential: (p - housed as f32) / p - housed as f32 / p,
+                commercial: (1.0 - fun_sum / p) + (1.0 - comfort_sum / p) - 1.0,
+                industrial: (p - employed as f32) / p - employed as f32 / p,
+            }
+        };
+        self.world.insert_resource(Demand {
+            residential: d.residential.clamp(-1.0, 1.0),
+            commercial: d.commercial.clamp(-1.0, 1.0),
+            industrial: d.industrial.clamp(-1.0, 1.0),
+        });
+    }
+
+    /// Nightly budget settle: property tax (rate x base x capacity x
+    /// development) plus the day's accumulated wage cut, minus services
+    /// upkeep on every zoned building. Day figures land in [`Ledger`]
+    /// for the budget panel; the wage accumulator resets for the new day.
+    fn settle_night(&mut self) {
+        self.recompute_demand();
+        let rate = self.world.get_resource::<TaxRate>().map(|t| t.0).unwrap_or(DEFAULT_TAX_RATE);
+        let mut property = 0.0;
+        let mut services = 0.0;
         {
             let mut q = self.world.query::<&CityBuilding>();
             for b in q.iter(&self.world) {
-                due += TAX_PER_CAP_DAY * b.capacity as f32 * b.development;
+                property += rate * TAX_BASE_PER_CAP_DAY * b.capacity as f32 * b.development;
+                services += SERVICES_PER_CAP_DAY * b.capacity as f32;
             }
         }
-        if due != 0.0 {
-            if let Some(mut t) = self.world.get_resource_mut::<Treasury>() {
-                t.0.accrue(due);
-            }
+        let wage = self.world.get_resource::<Ledger>().map(|l| l.wage_in).unwrap_or(0.0);
+        if let Some(mut t) = self.world.get_resource_mut::<Treasury>() {
+            t.0.accrue(property + wage - services);
         }
+        self.world.insert_resource(Ledger { property_in: property, wage_in: 0.0, services_out: services });
+    }
+
+    pub fn demand(&self) -> Demand {
+        self.world.get_resource::<Demand>().copied().unwrap_or_default()
+    }
+
+    pub fn ledger(&self) -> Ledger {
+        self.world.get_resource::<Ledger>().copied().unwrap_or_default()
+    }
+
+    pub fn tax_rate(&self) -> f32 {
+        self.world.get_resource::<TaxRate>().map(|t| t.0).unwrap_or(DEFAULT_TAX_RATE)
+    }
+
+    /// Set the tax rate, clamped to 0..=[`MAX_TAX_RATE`].
+    pub fn set_tax_rate(&mut self, rate: f32) {
+        self.world.insert_resource(TaxRate(rate.clamp(0.0, MAX_TAX_RATE)));
     }
 
     pub fn treasury(&self) -> i64 {
@@ -1408,7 +1536,7 @@ impl Sim {
                 });
             }
         }
-        SimSnapshot { version: SNAPSHOT_VERSION, agents, goals, workplaces, buildings, dwellings, obstacles, roads, walls: self.world.get_resource::<Walls>().map(|w| w.0.clone()).unwrap_or_default(), hour, day: self.day(), funds: self.funds(), treasury: self.treasury() }
+        SimSnapshot { version: SNAPSHOT_VERSION, agents, goals, workplaces, buildings, dwellings, obstacles, roads, walls: self.world.get_resource::<Walls>().map(|w| w.0.clone()).unwrap_or_default(), hour, day: self.day(), funds: self.funds(), treasury: self.treasury(), tax_rate: self.tax_rate() }
     }
 
     /// Restore a snapshot: swaps in a fresh world, respawns agents
@@ -1476,6 +1604,9 @@ impl Sim {
         self.world.insert_resource(Funds(Money { cents: snap.funds, frac: 0.0 }));
         self.world.insert_resource(Treasury(Money { cents: snap.treasury, frac: 0.0 }));
         self.world.insert_resource(DayCount(snap.day));
+        self.world.insert_resource(TaxRate(snap.tax_rate.clamp(0.0, MAX_TAX_RATE)));
+        self.world.insert_resource(Demand::default());
+        self.world.insert_resource(Ledger::default());
         self.world.insert_resource(Roads(snap.roads.clone()));
         self.world.insert_resource(Walls(snap.walls.clone()));
         for b in &snap.buildings {
@@ -1750,8 +1881,13 @@ fn work_shifts(world: &mut World, dt: f32) {
         }
     }
     if earned != 0.0 {
+        let rate = world.get_resource::<TaxRate>().map(|t| t.0).unwrap_or(DEFAULT_TAX_RATE);
         if let Some(mut funds) = world.get_resource_mut::<Funds>() {
-            funds.0.accrue(earned);
+            funds.0.accrue(earned * (1.0 - rate));
+        }
+        // The city's cut accumulates for the nightly settle.
+        if let Some(mut ledger) = world.get_resource_mut::<Ledger>() {
+            ledger.wage_in += earned * rate;
         }
     }
 }
@@ -2690,7 +2826,7 @@ mod tests {
     }
 
     #[test]
-    fn midnight_tick_collects_taxes_and_advances_day() {
+    fn midnight_tick_settles_budget_and_advances_day() {
         let mut sim = Sim::new();
         let b = sim.spawn_building(
             "t".to_string(),
@@ -2706,15 +2842,21 @@ mod tests {
         assert_eq!(sim.day(), 0); // no wrap yet
         sim.set_hour(5);
         assert_eq!(sim.day(), 1);
-        assert_eq!(sim.treasury(), (TAX_PER_CAP_DAY * 4.0 * 100.0) as i64);
+        // Property 0.10 x 50 x 4 x 1 = 20, services 2 x 4 = 8, net 12
+        // on top of the starting treasury.
+        assert_eq!(sim.treasury(), STARTING_TREASURY_CENTS + 1200);
+        let ledger = sim.ledger();
+        assert_eq!((ledger.property_in * 100.0) as i64, 2000);
+        assert_eq!((ledger.services_out * 100.0) as i64, 800);
+        assert_eq!((ledger.net() * 100.0) as i64, 1200);
         // Same-day hours don't double-collect.
         sim.set_hour(6);
         assert_eq!(sim.day(), 1);
-        assert_eq!(sim.treasury(), (TAX_PER_CAP_DAY * 4.0 * 100.0) as i64);
+        assert_eq!(sim.treasury(), STARTING_TREASURY_CENTS + 1200);
     }
 
     #[test]
-    fn undeveloped_buildings_pay_nothing() {
+    fn undeveloped_buildings_cost_services_but_pay_no_tax() {
         let mut sim = Sim::new();
         sim.spawn_building(
             "t".to_string(),
@@ -2723,11 +2865,13 @@ mod tests {
             0.0,
             10.0,
             10.0,
-        );
+        ); // capacity 4, development 0
         sim.set_hour(23);
         sim.set_hour(0);
         assert_eq!(sim.day(), 1);
-        assert_eq!(sim.treasury(), 0);
+        // No property tax, but services upkeep bleeds: -2 x 4 = -8.
+        assert_eq!(sim.treasury(), STARTING_TREASURY_CENTS - 800);
+        assert_eq!((sim.ledger().property_in * 100.0) as i64, 0);
     }
 
     #[test]
@@ -3106,5 +3250,135 @@ mod tests {
             }
         }
         assert!((1..6).contains(&playful), "playful count: {playful}");
+    }
+
+    #[test]
+    fn homeless_unemployed_city_demands_homes_and_jobs() {
+        let mut sim = Sim::new();
+        sim.spawn_agent(0.0, 0.0);
+        sim.spawn_agent(5.0, 5.0);
+        sim.set_hour(23);
+        sim.set_hour(0);
+        let d = sim.demand();
+        assert_eq!((d.residential, d.industrial), (1.0, 1.0));
+        // Fresh agents spawn at 0.8 fun/comfort: mostly satiated.
+        assert!((d.commercial - -0.6).abs() < 1e-4, "got {}", d.commercial);
+        // Starve them and commercial demand turns positive.
+        {
+            let mut q = sim.world.query::<&mut Needs>();
+            for mut n in q.iter_mut(&mut sim.world) {
+                n.fun = 0.1;
+                n.comfort = 0.1;
+            }
+        }
+        sim.set_hour(23);
+        sim.set_hour(0);
+        assert!((sim.demand().commercial - 0.8).abs() < 1e-4, "got {}", sim.demand().commercial);
+    }
+
+    #[test]
+    fn housed_employed_city_has_no_demand() {
+        let mut sim = Sim::new();
+        let a = sim.spawn_agent(0.0, 0.0);
+        let b = sim.spawn_agent(5.0, 5.0);
+        let home = sim.spawn_dwelling(0.0, 0.0, 2);
+        assert!(sim.move_in(a, home) && sim.move_in(b, home));
+        let wp = sim.spawn_workplace(20.0, 0.0, 100.0, 0, 24);
+        sim.employ(a, wp);
+        sim.employ(b, wp);
+        sim.set_hour(23);
+        sim.set_hour(0);
+        let d = sim.demand();
+        assert_eq!((d.residential, d.industrial), (-1.0, -1.0));
+    }
+
+    #[test]
+    fn residential_demand_doubles_growth() {
+        let mut sim = Sim::new();
+        sim.spawn_agent(0.0, 0.0); // homeless -> R = 1 after settle
+        sim.spawn_building("r".to_string(), ZoneFunction::Residential, 0.0, 0.0, 10.0, 10.0);
+        sim.set_roads(vec![vec![[-4.0, 4.0], [24.0, 4.0]]]);
+        sim.set_hour(23);
+        sim.set_hour(0);
+        assert_eq!(sim.demand().residential, 1.0);
+        sim.step(10.0);
+        let dev = |s: &mut Sim| {
+            let mut q = s.world.query::<&CityBuilding>();
+            q.iter(&s.world).next().unwrap().development
+        };
+        assert!((dev(&mut sim) - 0.4).abs() < 1e-4, "got {}", dev(&mut sim));
+    }
+
+    #[test]
+    fn glut_decays_despite_road_access() {
+        let mut sim = Sim::new();
+        let a = sim.spawn_agent(0.0, 0.0);
+        let home = sim.spawn_dwelling(0.0, 0.0, 1);
+        assert!(sim.move_in(a, home)); // housed -> R = -1 (glut)
+        let b = sim.spawn_building("r".to_string(), ZoneFunction::Residential, 0.0, 0.0, 10.0, 10.0);
+        sim.world.get_mut::<CityBuilding>(b).unwrap().development = 0.5;
+        sim.set_roads(vec![vec![[-4.0, 4.0], [24.0, 4.0]]]);
+        sim.set_hour(23);
+        sim.set_hour(0);
+        assert!(sim.demand().residential < -0.3);
+        sim.step(10.0);
+        let dev = sim.world.get::<CityBuilding>(b).unwrap().development;
+        assert!(dev < 0.5, "vacancy must decay, got {dev}");
+    }
+
+    #[test]
+    fn deficit_stalls_all_growth() {
+        let mut sim = Sim::new();
+        let b = sim.spawn_building("c".to_string(), ZoneFunction::Commercial, 0.0, 0.0, 10.0, 10.0);
+        sim.set_roads(vec![vec![[-4.0, 4.0], [24.0, 4.0]]]);
+        sim.world.insert_resource(Treasury(Money { cents: -100, frac: 0.0 }));
+        sim.step(10.0);
+        assert_eq!(sim.world.get::<CityBuilding>(b).unwrap().development, 0.0);
+    }
+
+    #[test]
+    fn tax_rate_scales_property_tax_and_clamps() {
+        let mut sim = Sim::new();
+        let b = sim.spawn_building("c".to_string(), ZoneFunction::Commercial, 0.0, 0.0, 10.0, 10.0);
+        sim.world.get_mut::<CityBuilding>(b).unwrap().development = 1.0;
+        sim.set_tax_rate(0.2);
+        assert_eq!(sim.tax_rate(), 0.2);
+        sim.set_hour(23);
+        sim.set_hour(0);
+        // Property 0.20 x 50 x 4 = 40, services 8, net 32.
+        assert_eq!(sim.treasury(), STARTING_TREASURY_CENTS + 3200);
+        sim.set_tax_rate(0.9);
+        assert_eq!(sim.tax_rate(), MAX_TAX_RATE);
+        sim.set_tax_rate(-0.5);
+        assert_eq!(sim.tax_rate(), 0.0);
+    }
+
+    #[test]
+    fn wages_split_between_household_and_city() {
+        let mut sim = Sim::new();
+        let a = sim.spawn_agent(0.0, 0.0);
+        let wp = sim.spawn_workplace(0.0, 0.0, 3600.0, 0, 24);
+        sim.employ(a, wp);
+        sim.world.entity_mut(a).insert(AgentState::Working);
+        sim.step(1.0); // earned 1.0: 0.9 to household, 0.1 to ledger
+        assert_eq!(sim.funds(), 90);
+        assert!((sim.ledger().wage_in - 0.1).abs() < 1e-4);
+        // Nightly settle moves the wage cut into the treasury.
+        sim.set_hour(23);
+        sim.set_hour(0);
+        assert_eq!(sim.treasury(), STARTING_TREASURY_CENTS + 10);
+        assert_eq!(sim.ledger().wage_in, 0.0); // accumulator reset
+    }
+
+    #[test]
+    fn snapshot_roundtrips_tax_rate_at_v2() {
+        let mut sim = Sim::new();
+        sim.set_tax_rate(0.2);
+        let snap = sim.snapshot();
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        let mut sim2 = Sim::new();
+        sim2.restore(&snap);
+        assert_eq!(sim2.tax_rate(), 0.2);
+        assert_eq!(sim.snapshot(), sim2.snapshot());
     }
 }

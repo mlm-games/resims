@@ -14,7 +14,7 @@ use repose_platform::RenderContext;
 use repose_ui::{Box as ReposeBox, Column, Row, Spacer, Text, TextStyle, ViewExt, ZStack};
 use repose_ui::scroll::{ScrollArea, remember_scroll_state};
 use repose_core::request_frame;
-use resims_sim::{AgentState as SimAgentState, ActionKind, CityBuilding, Dwelling, Employment, Entity, Furniture, FurnitureKind, Goal, Home, NeedKind, Needs, Obstacle, Position, Sim, Wall as SimWall, Workplace, ZoneFunction, DEFAULT_ATTENUATION, SAVE_VERSION, fmt_cents};
+use resims_sim::{AgentState as SimAgentState, ActionKind, CityBuilding, Demand, Dwelling, Employment, Entity, Furniture, FurnitureKind, Goal, Home, Ledger, NeedKind, Needs, Obstacle, Position, Sim, Wall as SimWall, Workplace, ZoneFunction, DEFAULT_ATTENUATION, SAVE_VERSION, fmt_cents};
 use game_utils::Storage;
 use game_utils::save::SaveManager;
 use game_utils::save_store::LoadStatus;
@@ -1067,7 +1067,7 @@ fn UiOverlay(session: SessionRef) -> View {
 }
 
 fn SimTime(session: SessionRef) -> View {
-    let (h, m, funds, day, treasury) = {
+    let (h, m, funds, day, treasury, demand, ledger) = {
         let s = session.borrow();
         let sim = s.sim.borrow();
         (
@@ -1076,6 +1076,8 @@ fn SimTime(session: SessionRef) -> View {
             sim.funds(),
             sim.day(),
             sim.treasury(),
+            sim.demand(),
+            sim.ledger(),
         )
     };
     let (pop, happy) = city_stats(&session.borrow());
@@ -1084,6 +1086,8 @@ fn SimTime(session: SessionRef) -> View {
             Text(format!("{h:02}:{m:02}")).size(17.6).color(Color::BLACK),
             Text(fmt_cents(funds)).size(12.8).color(Color(60, 60, 60, 255)),
             Text(format!("day {day} · city {}", fmt_cents(treasury))).size(12.8).color(Color(60, 60, 60, 255)),
+            Text(demand_line(demand)).size(12.8).color(Color(60, 60, 60, 255)),
+            Text(ledger_line(ledger)).size(12.8).color(Color(60, 60, 60, 255)),
             Text(format!("{pop} agents · {:.0}%", happy * 100.0)).size(12.8).color(Color(60, 60, 60, 255)),
             SpeedSlider(session),
             Row(Modifier::new().fill_max_width().gap(0.0)).child(vec![
@@ -1101,8 +1105,7 @@ fn SimTime(session: SessionRef) -> View {
 
 /// City stats for the time panel: population + average need level
 /// (0..=1) across all agents.
-fn city_stats(st: &UiState) -> (usize, f32) {
-    let mut sim = st.sim.borrow_mut();
+fn city_stats(st: &UiState) -> (usize, f32) {    let mut sim = st.sim.borrow_mut();
     let mut q = sim.world.query::<&Needs>();
     let mut n = 0usize;
     let mut sum = 0.0;
@@ -1111,6 +1114,18 @@ fn city_stats(st: &UiState) -> (usize, f32) {
         sum += needs.mean();
     }
     (n, if n == 0 { 1.0 } else { sum / n as f32 })
+}
+
+/// RCI demand as one compact panel line: "R+1.0 C-0.6 I+0.0".
+fn demand_line(d: Demand) -> String {
+    format!("R{:+.1} C{:+.1} I{:+.1}", d.residential, d.commercial, d.industrial)
+}
+
+/// Last settled day as one compact panel line: "$20 in · $8 out".
+fn ledger_line(l: Ledger) -> String {
+    let income = ((l.property_in + l.wage_in) * 100.0) as i64;
+    let out = (l.services_out * 100.0) as i64;
+    format!("{} in · {} out", fmt_cents(income), fmt_cents(out))
 }
 
 /// Thin antd-like slider: 4dp rail, round thumb, marks handled above.
@@ -2311,8 +2326,11 @@ fn SettingsTab() -> View {
 /// Loading restores sim + city edits; jobs, homes, queues reset.
 fn GameTab(session: SessionRef) -> View {
     let msg = session.borrow().last_save_msg.clone();
+    let rate = session.borrow().sim.borrow().tax_rate();
     let s_save = session.clone();
     let s_load = session.clone();
+    let s_down = session.clone();
+    let s_up = session.clone();
     let mut items = vec![
         Text("Saved Game").size(20.3).font_weight(FontWeight::BOLD),
         Row(Modifier::new().gap(8.0)).child(vec![
@@ -2324,6 +2342,23 @@ fn GameTab(session: SessionRef) -> View {
             }),
         ]),
         Text("Jobs, homes, queues and claims reset on load.".to_string())
+            .size(14.0)
+            .color(Color(80, 80, 80, 255)),
+        Text("City Budget".to_string()).size(20.3).font_weight(FontWeight::BOLD),
+        Row(Modifier::new().gap(8.0)).child(vec![
+            Clickable(PrimaryButton("-"), move || {
+                let ui = s_down.borrow_mut();
+                let r = ui.sim.borrow().tax_rate();
+                ui.sim.borrow_mut().set_tax_rate(r - 0.01);
+            }),
+            Text(format!("Tax {:.0}%", rate * 100.0)).size(14.0),
+            Clickable(PrimaryButton("+"), move || {
+                let ui = s_up.borrow_mut();
+                let r = ui.sim.borrow().tax_rate();
+                ui.sim.borrow_mut().set_tax_rate(r + 0.01);
+            }),
+        ]),
+        Text("Funds services; high taxes slow growth.".to_string())
             .size(14.0)
             .color(Color(80, 80, 80, 255)),
     ];
@@ -2687,6 +2722,15 @@ mod shortcut_tests {
         let (pop, happy) = city_stats(&s.borrow());
         assert_eq!(pop, 6);
         assert!((happy - 0.8).abs() < 1e-6, "happy: {happy}");
+    }
+
+    #[test]
+    fn panel_lines_format_demand_and_ledger() {
+        use resims_sim::Demand;
+        let d = Demand { residential: 1.0, commercial: -0.6, industrial: 0.05 };
+        assert_eq!(demand_line(d), "R+1.0 C-0.6 I+0.1");
+        let l = Ledger { property_in: 20.0, wage_in: 0.1, services_out: 8.0 };
+        assert_eq!(ledger_line(l), "$20.10 in · $8.00 out");
     }
 
     #[test]
