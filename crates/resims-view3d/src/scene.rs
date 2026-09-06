@@ -107,15 +107,6 @@ const LAYER_MARKER: u8 = 4;
 /// them correctly, so they share one layer.
 const LAYER_SOLID: u8 = 5;
 
-/// One shaded triangle in world space. `depth` is view-space distance
-/// (larger = farther) used for the painter sort within a `layer`.
-struct WorldTri {
-    v: [Vec3; 3],
-    c: [Rgb; 3],
-    depth: f32,
-    layer: u8,
-}
-
 /// Raw triangle with its painter layer (world space, pre-projection).
 type RawTri = ([Vec3; 3], Rgb, u8);
 
@@ -132,13 +123,24 @@ fn quad_tris(
     [([a, b, c], col, layer), ([a, c, d], col, layer)]
 }
 
-fn push_box(tris: &mut Vec<RawTri>, b: &BlockDef) {
-    push_box_at(tris, b.cx, b.cz, b.w, b.h, b.d, b.color);
+fn push_box(tris: &mut Vec<RawTri>, b: &BlockDef, eye: Vec3) {
+    push_box_at(tris, b.cx, b.cz, b.w, b.h, b.d, b.color, eye);
 }
 
 /// Prop (furniture) box: same shading as buildings.
-fn push_prop(tris: &mut Vec<RawTri>, p: &PropBox) {
-    push_box_at(tris, p.cx, p.cz, p.w, p.h, p.d, p.color);
+fn push_prop(tris: &mut Vec<RawTri>, p: &PropBox, eye: Vec3) {
+    push_box_at(tris, p.cx, p.cz, p.w, p.h, p.d, p.color, eye);
+}
+
+/// Analytic front-face test: does the plane (unit `dir` through `pt`)
+/// face the eye? Winding-independent (unlike GPU culling), with ~1° of
+/// slop so near-edge-on slivers are dropped while still invisible.
+/// Opposing faces of thin geometry tie in mean depth and flicker while
+/// orbiting; culling the far one removes the tie structurally. Safe for
+/// convex volumes viewed from outside: culled faces are always occluded.
+fn faces_eye(dir: Vec3, pt: Vec3, eye: Vec3) -> bool {
+    let to = eye - pt;
+    dir.dot(to) > 0.02 * to.length().max(1e-6)
 }
 
 fn push_box_at(
@@ -149,56 +151,67 @@ fn push_box_at(
     h: f32,
     d: f32,
     c: Rgb,
+    eye: Vec3,
 ) {
     let x0 = cx - w / 2.0;
     let x1 = cx + w / 2.0;
     let z0 = cz - d / 2.0;
     let z1 = cz + d / 2.0;
     // top (+Y)
-    tris.extend(quad_tris(
-        Vec3::new(x0, h, z0),
-        Vec3::new(x0, h, z1),
-        Vec3::new(x1, h, z1),
-        Vec3::new(x1, h, z0),
-        c, 1.0,
-        LAYER_SOLID,
-    ));
+    if faces_eye(Vec3::Y, Vec3::new(cx, h, cz), eye) {
+        tris.extend(quad_tris(
+            Vec3::new(x0, h, z0),
+            Vec3::new(x0, h, z1),
+            Vec3::new(x1, h, z1),
+            Vec3::new(x1, h, z0),
+            c, 1.0,
+            LAYER_SOLID,
+        ));
+    }
     // +X
-    tris.extend(quad_tris(
-        Vec3::new(x1, 0.0, z0),
-        Vec3::new(x1, 0.0, z1),
-        Vec3::new(x1, h, z1),
-        Vec3::new(x1, h, z0),
-        c, 0.82,
-        LAYER_SOLID,
-    ));
+    if faces_eye(Vec3::X, Vec3::new(x1, h / 2.0, cz), eye) {
+        tris.extend(quad_tris(
+            Vec3::new(x1, 0.0, z0),
+            Vec3::new(x1, 0.0, z1),
+            Vec3::new(x1, h, z1),
+            Vec3::new(x1, h, z0),
+            c, 0.82,
+            LAYER_SOLID,
+        ));
+    }
     // -X
-    tris.extend(quad_tris(
-        Vec3::new(x0, 0.0, z1),
-        Vec3::new(x0, 0.0, z0),
-        Vec3::new(x0, h, z0),
-        Vec3::new(x0, h, z1),
-        c, 0.72,
-        LAYER_SOLID,
-    ));
+    if faces_eye(Vec3::NEG_X, Vec3::new(x0, h / 2.0, cz), eye) {
+        tris.extend(quad_tris(
+            Vec3::new(x0, 0.0, z1),
+            Vec3::new(x0, 0.0, z0),
+            Vec3::new(x0, h, z0),
+            Vec3::new(x0, h, z1),
+            c, 0.72,
+            LAYER_SOLID,
+        ));
+    }
     // +Z
-    tris.extend(quad_tris(
-        Vec3::new(x1, 0.0, z1),
-        Vec3::new(x0, 0.0, z1),
-        Vec3::new(x0, h, z1),
-        Vec3::new(x1, h, z1),
-        c, 0.88,
-        LAYER_SOLID,
-    ));
+    if faces_eye(Vec3::Z, Vec3::new(cx, h / 2.0, z1), eye) {
+        tris.extend(quad_tris(
+            Vec3::new(x1, 0.0, z1),
+            Vec3::new(x0, 0.0, z1),
+            Vec3::new(x0, h, z1),
+            Vec3::new(x1, h, z1),
+            c, 0.88,
+            LAYER_SOLID,
+        ));
+    }
     // -Z
-    tris.extend(quad_tris(
-        Vec3::new(x0, 0.0, z0),
-        Vec3::new(x1, 0.0, z0),
-        Vec3::new(x1, h, z0),
-        Vec3::new(x0, h, z0),
-        c, 0.66,
-        LAYER_SOLID,
-    ));
+    if faces_eye(Vec3::NEG_Z, Vec3::new(cx, h / 2.0, z0), eye) {
+        tris.extend(quad_tris(
+            Vec3::new(x0, 0.0, z0),
+            Vec3::new(x1, 0.0, z0),
+            Vec3::new(x1, h, z0),
+            Vec3::new(x0, h, z0),
+            c, 0.66,
+            LAYER_SOLID,
+        ));
+    }
 }
 
 /// Agent token: small octahedron standing on the ground.
@@ -276,40 +289,78 @@ fn push_poly(tris: &mut Vec<RawTri>, p: &PathPoly) {
     }
 }
 
-/// Built wall: thin vertical box along the segment (sides + top cap).
-fn push_wall(tris: &mut Vec<RawTri>, w: &WallSeg) {
+/// Built wall: thin vertical box along the segment (front side + top cap
+/// + facing end caps), split into <=2u chunks. Only camera-facing planes
+/// are emitted (analytic, winding-independent): opposing sides of thin
+/// geometry tie in mean depth and flicker while orbiting, so the far one
+/// is culled structurally. Long single faces get mean depths far from
+/// their pixels at grazing angles, hence the chunking.
+fn push_wall(tris: &mut Vec<RawTri>, w: &WallSeg, eye: Vec3) {
     let dx = w.bx - w.ax;
     let dz = w.bz - w.az;
     let len = (dx * dx + dz * dz).sqrt().max(1e-6);
-    let (nx, nz) = (-dz / len * 0.2, dx / len * 0.2);
+    let (ux, uz) = (-dz / len, dx / len); // unit left normal
+    let (nx, nz) = (ux * 0.2, uz * 0.2);
     let h = w.height;
-    // +n side
-    tris.extend(quad_tris(
-        Vec3::new(w.ax + nx, 0.0, w.az + nz),
-        Vec3::new(w.bx + nx, 0.0, w.bz + nz),
-        Vec3::new(w.bx + nx, h, w.bz + nz),
-        Vec3::new(w.ax + nx, h, w.az + nz),
-        w.color, 0.82,
-        LAYER_SOLID,
-    ));
-    // -n side
-    tris.extend(quad_tris(
-        Vec3::new(w.bx - nx, 0.0, w.bz - nz),
-        Vec3::new(w.ax - nx, 0.0, w.az - nz),
-        Vec3::new(w.ax - nx, h, w.az - nz),
-        Vec3::new(w.bx - nx, h, w.bz - nz),
-        w.color, 0.66,
-        LAYER_SOLID,
-    ));
-    // top cap
-    tris.extend(quad_tris(
-        Vec3::new(w.ax - nx, h, w.az - nz),
-        Vec3::new(w.ax + nx, h, w.az + nz),
-        Vec3::new(w.bx + nx, h, w.bz + nz),
-        Vec3::new(w.bx - nx, h, w.bz - nz),
-        w.color, 1.0,
-        LAYER_SOLID,
-    ));
+    let n = (len / 2.0).ceil().max(1.0) as usize;
+    for i in 0..n {
+        let t0 = i as f32 / n as f32;
+        let t1 = (i + 1) as f32 / n as f32;
+        let (ax, az) = (w.ax + dx * t0, w.az + dz * t0);
+        let (bx, bz) = (w.ax + dx * t1, w.az + dz * t1);
+        let (mx, mz) = ((ax + bx) / 2.0, (az + bz) / 2.0);
+        // +n side
+        if faces_eye(Vec3::new(ux, 0.0, uz), Vec3::new(mx + nx, h / 2.0, mz + nz), eye) {
+            tris.extend(quad_tris(
+                Vec3::new(ax + nx, 0.0, az + nz),
+                Vec3::new(bx + nx, 0.0, bz + nz),
+                Vec3::new(bx + nx, h, bz + nz),
+                Vec3::new(ax + nx, h, az + nz),
+                w.color, 0.82,
+                LAYER_SOLID,
+            ));
+        }
+        // -n side
+        if faces_eye(Vec3::new(-ux, 0.0, -uz), Vec3::new(mx - nx, h / 2.0, mz - nz), eye) {
+            tris.extend(quad_tris(
+                Vec3::new(bx - nx, 0.0, bz - nz),
+                Vec3::new(ax - nx, 0.0, az - nz),
+                Vec3::new(ax - nx, h, az - nz),
+                Vec3::new(bx - nx, h, bz - nz),
+                w.color, 0.66,
+                LAYER_SOLID,
+            ));
+        }
+        // top cap
+        if faces_eye(Vec3::Y, Vec3::new(mx, h, mz), eye) {
+            tris.extend(quad_tris(
+                Vec3::new(ax - nx, h, az - nz),
+                Vec3::new(ax + nx, h, az + nz),
+                Vec3::new(bx + nx, h, bz + nz),
+                Vec3::new(bx - nx, h, bz - nz),
+                w.color, 1.0,
+                LAYER_SOLID,
+            ));
+        }
+    }
+    // End caps (camera-facing only: same tie argument as the sides).
+    let (tx, tz) = (dx / len, dz / len);
+    for (ex, ez, s) in [(w.ax, w.az, -1.0), (w.bx, w.bz, 1.0)] {
+        if faces_eye(
+            Vec3::new(tx * s, 0.0, tz * s),
+            Vec3::new(ex, h / 2.0, ez),
+            eye,
+        ) {
+            tris.extend(quad_tris(
+                Vec3::new(ex - nx * s, 0.0, ez - nz * s),
+                Vec3::new(ex + nx * s, 0.0, ez + nz * s),
+                Vec3::new(ex + nx * s, h, ez + nz * s),
+                Vec3::new(ex - nx * s, h, ez - nz * s),
+                w.color, 0.74,
+                LAYER_SOLID,
+            ));
+        }
+    }
 }
 
 /// Near-plane distance used for CPU-side clipping. Must match the `near`
@@ -375,6 +426,7 @@ pub fn build_sorted_tris(
     // pivot the whole scene around the wrong center.
     let proj = cam.proj_matrix(aspect);
     let view = cam.view_matrix();
+    let eye = cam.eye();
 
     let mut raw: Vec<RawTri> = Vec::with_capacity(512);
     // Ground.
@@ -410,7 +462,7 @@ pub fn build_sorted_tris(
         k += GRID_STEP;
     }
     for b in BLOCKS {
-        push_box(&mut raw, &b);
+        push_box(&mut raw, &b, eye);
     }
     for a in agents {
         push_agent(&mut raw, a);
@@ -425,10 +477,10 @@ pub fn build_sorted_tris(
         push_poly(&mut raw, p);
     }
     for w in walls {
-        push_wall(&mut raw, w);
+        push_wall(&mut raw, w, eye);
     }
     for p in props {
-        push_prop(&mut raw, p);
+        push_prop(&mut raw, p, eye);
     }
 
     // Transform with near-plane clipping, then painter-sort: layers pin
@@ -438,34 +490,7 @@ pub fn build_sorted_tris(
     // `w <= 0.05`; giant tris like the ground halves and full-map grid
     // strips constantly lost a corner behind the camera while orbiting,
     // so visible geometry popped in and out by angle.)
-    let mut tris: Vec<WorldTri> = Vec::with_capacity(raw.len());
-    for (v, col, layer) in raw {
-        for clipped in clip_near(&v, &view) {
-            let c0 = proj * clipped[0];
-            let c1 = proj * clipped[1];
-            let c2 = proj * clipped[2];
-            if c0.w <= 0.0 || c1.w <= 0.0 || c2.w <= 0.0 {
-                continue; // safety net: clipping guarantees w > 0
-            }
-            let ndc = [
-                [c0.x / c0.w, c0.y / c0.w, c0.z / c0.w],
-                [c1.x / c1.w, c1.y / c1.w, c1.z / c1.w],
-                [c2.x / c2.w, c2.y / c2.w, c2.z / c2.w],
-            ];
-            let depth = -(clipped[0].z + clipped[1].z + clipped[2].z) / 3.0;
-            tris.push(WorldTri {
-                v: [Vec3::from(ndc[0]), Vec3::from(ndc[1]), Vec3::from(ndc[2])],
-                c: [col, col, col],
-                depth,
-                layer,
-            });
-        }
-    }
-    tris.sort_by(|a, b| {
-        a.layer
-            .cmp(&b.layer)
-            .then(b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal))
-    });
+    let tris = layout_tris(raw, &proj, &view);
 
     let mut out = Vec::with_capacity(tris.len() * 18);
     for t in &tris {
@@ -476,6 +501,54 @@ pub fn build_sorted_tris(
     }
     let n = tris.len();
     (out, n)
+}
+
+/// Shared clip + project + painter-sort path (renderer and tests use the
+/// same layout, so the hunt below checks what is actually drawn).
+/// `vd` keeps per-vertex view depths for the painter oracle.
+#[derive(Clone)]
+struct LaidTri {
+    v: [Vec3; 3],
+    c: [Rgb; 3],
+    depth: f32,
+    /// Per-vertex view depths: only the painter-oracle test reads these
+    /// (per-pixel depth), the renderer uses the mean `depth`.
+    #[allow(dead_code)]
+    vd: [f32; 3],
+    layer: u8,
+}
+
+fn layout_tris(raw: Vec<RawTri>, proj: &Mat4, view: &Mat4) -> Vec<LaidTri> {
+    let mut tris: Vec<LaidTri> = Vec::with_capacity(raw.len());
+    for (v, col, layer) in raw {
+        for clipped in clip_near(&v, view) {
+            let c0 = *proj * clipped[0];
+            let c1 = *proj * clipped[1];
+            let c2 = *proj * clipped[2];
+            if c0.w <= 0.0 || c1.w <= 0.0 || c2.w <= 0.0 {
+                continue; // safety net: clipping guarantees w > 0
+            }
+            let ndc = [
+                [c0.x / c0.w, c0.y / c0.w, c0.z / c0.w],
+                [c1.x / c1.w, c1.y / c1.w, c1.z / c1.w],
+                [c2.x / c2.w, c2.y / c2.w, c2.z / c2.w],
+            ];
+            let vd = [-clipped[0].z, -clipped[1].z, -clipped[2].z];
+            tris.push(LaidTri {
+                v: [Vec3::from(ndc[0]), Vec3::from(ndc[1]), Vec3::from(ndc[2])],
+                c: [col, col, col],
+                depth: (vd[0] + vd[1] + vd[2]) / 3.0,
+                vd,
+                layer,
+            });
+        }
+    }
+    tris.sort_by(|a, b| {
+        a.layer
+            .cmp(&b.layer)
+            .then(b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    tris
 }
 
 /// Block definition by id (stable for the starter skyline).
@@ -578,6 +651,156 @@ mod tests {
         assert_eq!(pick(&cam, ASPECT, VIEWPORT, px), None);
     }
 
+    /// Screen-space barycentric of `p` in triangle `t` (2D, NDC x/y).
+    /// Returns `None` for degenerate triangles.
+    fn bary2(t: &[[f32; 3]; 3], p: [f32; 2]) -> Option<[f32; 3]> {
+        let (ax, ay) = (t[0][0], t[0][1]);
+        let (bx, by) = (t[1][0], t[1][1]);
+        let (cx, cy) = (t[2][0], t[2][1]);
+        let d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+        if d.abs() < 1e-12 {
+            return None;
+        }
+        let l0 = ((by - cy) * (p[0] - cx) + (cx - bx) * (p[1] - cy)) / d;
+        let l1 = ((cy - ay) * (p[0] - cx) + (ax - cx) * (p[1] - cy)) / d;
+        Some([l0, l1, 1.0 - l0 - l1])
+    }
+
+    /// Painter oracle: same-layer pairs whose draw order contradicts
+    /// per-pixel depth at mutually covered pixels flicker while orbiting.
+    /// Uses the real [`layout_tris`] path, so this guards what is drawn.
+    /// Prints offenders, fails on any visible (different-color, on-screen)
+    /// inversion. Agents are kept apart: interpenetrating octahedra cannot
+    /// be depth-sorted by any painter (crowd contact may shimmer slightly).
+    #[test]
+    fn painter_order_matches_per_pixel_depth() {
+        use crate::camera::OrbitCamera;
+        let agents = [
+            AgentMarker { x: 2.0, z: 2.0, color: [1.0, 0.0, 0.0] },
+            AgentMarker { x: 30.0, z: -20.0, color: [0.0, 1.0, 1.0] },
+        ];
+        let markers = [GroundMarker { x: 10.0, z: 10.0, color: [1.0, 0.0, 1.0], size: 1.2 }];
+        let paths = [PathLine {
+            points: vec![[-8.0, 0.0], [0.0, 0.0], [8.0, 8.0]],
+            width: 2.0,
+            color: [1.0, 1.0, 1.0],
+        }];
+        let polys = [PathPoly {
+            points: vec![[20.0, 0.0], [28.0, 0.0], [28.0, 8.0], [20.0, 8.0]],
+            color: [1.0, 1.0, 0.0],
+        }];
+        let walls = [WallSeg { ax: -4.0, az: -4.0, bx: 4.0, bz: -4.0, height: 3.0, color: [0.9, 0.9, 0.9] }];
+        let props = [PropBox { cx: 0.0, cz: 20.0, w: 1.2, h: 2.2, d: 1.2, color: [0.92, 0.92, 0.94] }];
+        let mut bad = 0;
+        for dist in [20.0, 60.0, 150.0, 400.0] {
+            for pitch in [0.12, 0.5, 0.85, 1.2] {
+                for yaw in [0.0, 0.4, 0.8, 1.2, 1.6, 2.4, 3.1, 4.0, 5.0, 5.8] {
+                    let mut cam = OrbitCamera::default();
+                    cam.dist = dist;
+                    cam.pitch = pitch;
+                    cam.yaw = yaw;
+                    let proj = cam.proj_matrix(ASPECT);
+                    let view = cam.view_matrix();
+                    let eye = cam.eye();
+                    let mut raw: Vec<RawTri> = Vec::new();
+                    let g = GROUND_SIZE / 2.0;
+                    raw.extend(quad_tris(
+                        Vec3::new(-g, 0.0, -g), Vec3::new(-g, 0.0, g),
+                        Vec3::new(g, 0.0, g), Vec3::new(g, 0.0, -g),
+                        GRASS, 1.0, LAYER_GROUND,
+                    ));
+                    for b in BLOCKS {
+                        push_box(&mut raw, &b, eye);
+                    }
+                    for a in &agents {
+                        push_agent(&mut raw, a);
+                    }
+                    for m in &markers {
+                        push_marker(&mut raw, m);
+                    }
+                    for p in &paths {
+                        push_path(&mut raw, p);
+                    }
+                    for p in &polys {
+                        push_poly(&mut raw, p);
+                    }
+                    for w in &walls {
+                        push_wall(&mut raw, w, eye);
+                    }
+                    for p in &props {
+                        push_prop(&mut raw, p, eye);
+                    }
+                    // Real layout path: already layer + far->near sorted.
+                    let tris = layout_tris(raw, &proj, &view);
+                    let ndc_of = |t: &LaidTri| {
+                        [
+                            [t.v[0].x, t.v[0].y, t.v[0].z],
+                            [t.v[1].x, t.v[1].y, t.v[1].z],
+                            [t.v[2].x, t.v[2].y, t.v[2].z],
+                        ]
+                    };
+                    // Depth at pixel via perspective-correct 1/z interpolation.
+                    // Pixels near a tri edge are boundary ties (sub-pixel
+                    // shimmer); only interior-interior contradictions are
+                    // visible pops, so edges are skipped.
+                    let z_at = |t: &LaidTri, p: [f32; 2]| -> Option<f32> {
+                        let l = bary2(&ndc_of(t), p)?;
+                        if l.iter().any(|x| *x < 0.02 || *x > 0.98) {
+                            return None;
+                        }
+                        let inv = l[0] / t.vd[0] + l[1] / t.vd[1] + l[2] / t.vd[2];
+                        if inv <= 0.0 {
+                            return None;
+                        }
+                        Some(1.0 / inv)
+                    };
+                    for (oi, a) in tris.iter().enumerate() {
+                        for b in &tris[oi + 1..] {
+                            if a.layer != b.layer || a.c == b.c {
+                                continue; // layers decide; same color is invisible
+                            }
+                            // Candidate pixels: tri centroids inside the other tri.
+                            // Centroids are interior by construction, so any
+                            // contradiction here is a visible pop, not edge
+                            // shimmer. Off-screen overlap is GPU-clipped.
+                            let centroid = |t: &LaidTri| {
+                                [
+                                    (t.v[0].x + t.v[1].x + t.v[2].x) / 3.0,
+                                    (t.v[0].y + t.v[1].y + t.v[2].y) / 3.0,
+                                ]
+                            };
+                            let onscreen = |p: [f32; 2]| p[0].abs() <= 1.0 && p[1].abs() <= 1.0;
+                            let mut pts = Vec::new();
+                            let (ca, cb) = (centroid(a), centroid(b));
+                            if onscreen(ca) && z_at(b, ca).is_some() {
+                                pts.push(ca);
+                            }
+                            if onscreen(cb) && z_at(a, cb).is_some() {
+                                pts.push(cb);
+                            }
+                            for p in pts {
+                                let (Some(za), Some(zb)) = (z_at(a, p), z_at(b, p)) else {
+                                    continue; // edge pixel: boundary tie, not a pop
+                                };
+                                // `a` drawn first => must be farther at every shared pixel.
+                                if za < zb - (zb * 0.001 + 1e-4) {
+                                    println!(
+                                        "INVERSION dist={dist} pitch={pitch:.2} yaw={yaw:.2} \
+                                         a(col={:?},mean={:.1}) over b(col={:?},mean={:.1}) \
+                                         pixel=({:.3},{:.3}) za={:.2} zb={:.2}",
+                                        a.c[0], a.depth, b.c[0], b.depth, p[0], p[1], za, zb
+                                    );
+                                    bad += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(bad, 0, "{bad} painter inversions found (see output above)");
+    }
+
     #[test]
     fn agents_and_markers_add_tris() {
         use crate::camera::OrbitCamera;
@@ -590,8 +813,10 @@ mod tests {
         let walls = [WallSeg { ax: -4.0, az: -4.0, bx: 4.0, bz: -4.0, height: 3.0, color: [0.9, 0.9, 0.9] }];
         let props = [PropBox { cx: 0.0, cz: 20.0, w: 1.2, h: 2.2, d: 1.2, color: [0.92, 0.92, 0.94] }];
         let (floats, n) = build_sorted_tris(&cam, ASPECT, &agents, &markers, &paths, &polys, &walls, &props);
-        // octahedron (8) + diamond (2) + ribbon (2 segments x 2) + fan (2) + wall box (6) + prop box (10).
-        assert_eq!(n, base + 32);
+        // octahedron (8) + diamond (2) + ribbon (2 segments x 2) + fan (2)
+        // + wall (8-long -> 4 chunks x (side + cap) + 1 facing end = 18)
+        // + prop box (top + 2 facing sides = 6).
+        assert_eq!(n, base + 40);
         assert_eq!(floats.len(), n * 18);
         assert!(floats.iter().all(|f| f.is_finite()));
     }
@@ -704,10 +929,10 @@ mod tests {
         // Counts pinned post-fix (whole-triangle dropping gave far fewer);
         // all output must stay finite so the divide never explodes.
         for (dist, pitch, yaw, pinned) in [
-            (15.0, 0.12, 0.0, 172),
-            (15.0, 0.12, 2.1, 202),
-            (30.0, 0.12, 4.0, 215),
-            (25.0, 0.3, 1.0, 214),
+            (15.0, 0.12, 0.0, 129),
+            (15.0, 0.12, 2.1, 153),
+            (30.0, 0.12, 4.0, 169),
+            (25.0, 0.3, 1.0, 170),
         ] {
             let mut cam = OrbitCamera::default();
             cam.dist = dist;
