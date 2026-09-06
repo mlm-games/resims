@@ -14,7 +14,7 @@ use repose_platform::RenderContext;
 use repose_ui::{Box as ReposeBox, Column, Row, Spacer, Text, TextStyle, ViewExt, ZStack};
 use repose_ui::scroll::{ScrollArea, remember_scroll_state};
 use repose_core::request_frame;
-use resims_sim::{AgentState as SimAgentState, ActionKind, CityBuilding, Demand, Dwelling, Employment, Entity, Furniture, FurnitureKind, Goal, Home, Ledger, NeedKind, Needs, Obstacle, Position, Sim, Wall as SimWall, Workplace, ZoneFunction, DEFAULT_ATTENUATION, SAVE_VERSION, fmt_cents};
+use resims_sim::{AgentState as SimAgentState, ActionKind, CityBuilding, Demand, Dwelling, Employment, Entity, Furniture, FurnitureKind, Goal, Home, Ledger, NeedKind, Needs, Obstacle, Personality, Position, Sim, Wall as SimWall, Workplace, ZoneFunction, DEFAULT_ATTENUATION, SAVE_VERSION, fmt_cents, outfit_for};
 use game_utils::Storage;
 use game_utils::save::SaveManager;
 use game_utils::save_store::LoadStatus;
@@ -785,22 +785,28 @@ fn handle_shortcut(session: &SessionRef, event: KeyEvent) -> bool {
 fn Canvas3d(session: SessionRef) -> View {
     let input = {
         let s = session.borrow();
-        // Agent tokens from the live sim, coloured by state.
+        // Agent avatars from the live sim: outfit/skin identity from
+        // personality, floating badge coloured by state.
         let agents: Vec<AgentMarker> = {
             let mut sim = s.sim.borrow_mut();
-            let mut q = sim.world.query::<(&Position, &SimAgentState)>();
+            let mut q = sim.world.query::<(&Position, &SimAgentState, &Personality)>();
             q.iter_mut(&mut sim.world)
-                .map(|(p, st)| AgentMarker {
-                    x: p.x,
-                    z: p.z,
-                    color: match st {
-                        SimAgentState::Idle => [0.45, 0.65, 0.45],
-                        SimAgentState::Walk => [0.90, 0.70, 0.30],
-                        SimAgentState::SeekGoal => [0.95, 0.55, 0.25],
-                        SimAgentState::Socialize => [0.95, 0.55, 0.70],
-                        SimAgentState::Working => [0.45, 0.55, 0.95],
-                        SimAgentState::Sleeping => [0.35, 0.40, 0.75],
-                    },
+                .map(|(p, st, personality)| {
+                    let (outfit, skin) = outfit_for(personality);
+                    AgentMarker {
+                        x: p.x,
+                        z: p.z,
+                        outfit,
+                        skin,
+                        accent: match st {
+                            SimAgentState::Idle => [0.45, 0.65, 0.45],
+                            SimAgentState::Walk => [0.90, 0.70, 0.30],
+                            SimAgentState::SeekGoal => [0.95, 0.55, 0.25],
+                            SimAgentState::Socialize => [0.95, 0.55, 0.70],
+                            SimAgentState::Working => [0.45, 0.55, 0.95],
+                            SimAgentState::Sleeping => [0.35, 0.40, 0.75],
+                        },
+                    }
                 })
                 .collect()
         };
@@ -860,6 +866,15 @@ fn Canvas3d(session: SessionRef) -> View {
                         color: [0.35, 0.75, 0.85],
                         size: 1.6,
                     })
+                    .collect::<Vec<_>>()
+            })
+            // Selected agent gets a white ring (roster click-to-direct).
+            .chain({
+                let sim = s.sim.borrow();
+                s.selected_agent
+                    .and_then(|e| sim.world.get::<Position>(e))
+                    .map(|p| GroundMarker { x: p.x, z: p.z, color: [1.0, 1.0, 1.0], size: 2.2 })
+                    .into_iter()
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -2731,6 +2746,25 @@ mod shortcut_tests {
         assert_eq!(demand_line(d), "R+1.0 C-0.6 I+0.1");
         let l = Ledger { property_in: 20.0, wage_in: 0.1, services_out: 8.0 };
         assert_eq!(ledger_line(l), "$20.10 in · $8.00 out");
+    }
+
+    #[test]
+    fn seeded_agents_get_valid_stable_outfits() {
+        let s = session_seeded();
+        let st = s.borrow();
+        let mut sim = st.sim.borrow_mut();
+        let mut q = sim.world.query::<&Personality>();
+        let mut count = 0;
+        for p in q.iter(&sim.world) {
+            let (o, skin) = outfit_for(p);
+            for c in o.into_iter().chain(skin) {
+                assert!((0.0..=1.0).contains(&c), "channel {c}");
+            }
+            // Stable identity: same traits, same look.
+            assert_eq!(outfit_for(p), (o, skin));
+            count += 1;
+        }
+        assert!(count > 0, "seeded session must have agents");
     }
 
     #[test]

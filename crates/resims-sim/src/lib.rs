@@ -476,6 +476,32 @@ impl Personality {
     }
 }
 
+/// Avatar outfit + skin tone from personality (stable visual identity:
+/// same traits always pick the same look, so twins read as distinct
+/// people on canvas). Returns `(outfit, skin)` linear-space RGB.
+pub fn outfit_for(p: &Personality) -> ([f32; 3], [f32; 3]) {
+    const OUTFITS: [[f32; 3]; 6] = [
+        [0.20, 0.55, 0.55], // teal
+        [0.75, 0.35, 0.20], // rust
+        [0.80, 0.65, 0.25], // mustard
+        [0.55, 0.35, 0.65], // plum
+        [0.35, 0.45, 0.80], // slate blue
+        [0.50, 0.60, 0.30], // olive
+    ];
+    const SKINS: [[f32; 3]; 4] = [
+        [0.95, 0.80, 0.68],
+        [0.85, 0.62, 0.48],
+        [0.62, 0.42, 0.30],
+        [0.40, 0.27, 0.20],
+    ];
+    let oi = ((p.playful * 12.0) as usize
+        + (p.outgoing * 7.0) as usize * 2
+        + (p.active * 5.0) as usize * 3)
+        % OUTFITS.len();
+    let si = (p.outgoing * SKINS.len() as f32) as usize % SKINS.len();
+    (OUTFITS[oi], SKINS[si])
+}
+
 /// Learnable skills 0..=1, all start at 0 and grow +0.02 per relevant
 /// arrival (cap 1). Cooking scales hunger restoration, charisma scales
 /// sociability restoration.
@@ -3380,5 +3406,18 @@ mod tests {
         sim2.restore(&snap);
         assert_eq!(sim2.tax_rate(), 0.2);
         assert_eq!(sim.snapshot(), sim2.snapshot());
+    }
+
+    #[test]
+    fn outfits_are_stable_and_distinct() {
+        let a = Personality { playful: 0.0, outgoing: 0.0, active: 0.0 };
+        let b = Personality { playful: 0.9, outgoing: 0.1, active: 0.2 };
+        assert_eq!(outfit_for(&a), outfit_for(&a));
+        assert_ne!(outfit_for(&a).0, outfit_for(&b).0);
+        for (o, s) in [outfit_for(&a), outfit_for(&b)] {
+            for c in o.into_iter().chain(s) {
+                assert!((0.0..=1.0).contains(&c), "channel {c}");
+            }
+        }
     }
 }

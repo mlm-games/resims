@@ -41,12 +41,15 @@ pub const BLOCKS: [BlockDef; 7] = [    BlockDef { id: "bld:1", cx: -14.0, cz: -8
     BlockDef { id: "bld:7", cx: -30.0, cz: -2.0, w: 8.0, h: 4.0, d: 10.0, color: [0.65, 0.72, 0.60] },
 ];
 
-/// Dynamic agent token from the sim (drawn as a small octahedron).
+/// Dynamic agent avatar from the sim: outfit body + skin head + a
+/// floating state badge (activity reads at a glance, identity is stable).
 #[derive(Clone, Copy, Debug)]
 pub struct AgentMarker {
     pub x: f32,
     pub z: f32,
-    pub color: Rgb,
+    pub outfit: Rgb,
+    pub skin: Rgb,
+    pub accent: Rgb,
 }
 
 /// Flat planning marker (diamond quad on the ground).
@@ -214,24 +217,53 @@ fn push_box_at(
     }
 }
 
-/// Agent token: small octahedron standing on the ground.
+/// Agent avatar: outfit octahedron body, skin octahedron head, flat
+/// state badge floating above (18 tris, all solid layer).
 fn push_agent(tris: &mut Vec<RawTri>, a: &AgentMarker) {
-    let top = Vec3::new(a.x, 2.1, a.z);
-    let bottom = Vec3::new(a.x, 0.3, a.z);
+    let body_top = Vec3::new(a.x, 1.9, a.z);
+    let body_bottom = Vec3::new(a.x, 0.3, a.z);
     let ring = [
-        Vec3::new(a.x + 0.9, 1.2, a.z),
-        Vec3::new(a.x, 1.2, a.z + 0.9),
-        Vec3::new(a.x - 0.9, 1.2, a.z),
-        Vec3::new(a.x, 1.2, a.z - 0.9),
+        Vec3::new(a.x + 0.9, 1.1, a.z),
+        Vec3::new(a.x, 1.1, a.z + 0.9),
+        Vec3::new(a.x - 0.9, 1.1, a.z),
+        Vec3::new(a.x, 1.1, a.z - 0.9),
     ];
-    let bright = [a.color[0], a.color[1], a.color[2]];
-    let dim = [a.color[0] * 0.7, a.color[1] * 0.7, a.color[2] * 0.7];
+    let bright = [a.outfit[0], a.outfit[1], a.outfit[2]];
+    let dim = [a.outfit[0] * 0.7, a.outfit[1] * 0.7, a.outfit[2] * 0.7];
     for i in 0..4 {
         let p = ring[i];
         let q = ring[(i + 1) % 4];
-        tris.push(([top, p, q], bright, LAYER_SOLID));
-        tris.push(([bottom, q, p], dim, LAYER_SOLID));
+        tris.push(([body_top, p, q], bright, LAYER_SOLID));
+        tris.push(([body_bottom, q, p], dim, LAYER_SOLID));
     }
+    // Head: smaller octahedron on top.
+    let head_top = Vec3::new(a.x, 3.0, a.z);
+    let head_bottom = Vec3::new(a.x, 1.9, a.z);
+    let hring = [
+        Vec3::new(a.x + 0.45, 2.45, a.z),
+        Vec3::new(a.x, 2.45, a.z + 0.45),
+        Vec3::new(a.x - 0.45, 2.45, a.z),
+        Vec3::new(a.x, 2.45, a.z - 0.45),
+    ];
+    let hbright = [a.skin[0], a.skin[1], a.skin[2]];
+    let hdim = [a.skin[0] * 0.75, a.skin[1] * 0.75, a.skin[2] * 0.75];
+    for i in 0..4 {
+        let p = hring[i];
+        let q = hring[(i + 1) % 4];
+        tris.push(([head_top, p, q], hbright, LAYER_SOLID));
+        tris.push(([head_bottom, q, p], hdim, LAYER_SOLID));
+    }
+    // Badge: flat state-coloured diamond floating above the head.
+    let s = 0.45;
+    let y = 3.3;
+    tris.extend(quad_tris(
+        Vec3::new(a.x - s, y, a.z),
+        Vec3::new(a.x, y, a.z + s),
+        Vec3::new(a.x + s, y, a.z),
+        Vec3::new(a.x, y, a.z - s),
+        a.accent, 1.0,
+        LAYER_SOLID,
+    ));
 }
 
 /// Planning marker: flat diamond quad just above the ground.
@@ -634,6 +666,7 @@ mod tests {
         }
     }
 
+
     #[test]
     fn pick_roundtrip_hits_known_block() {
         let cam = OrbitCamera::default();
@@ -676,8 +709,8 @@ mod tests {
     fn painter_order_matches_per_pixel_depth() {
         use crate::camera::OrbitCamera;
         let agents = [
-            AgentMarker { x: 2.0, z: 2.0, color: [1.0, 0.0, 0.0] },
-            AgentMarker { x: 30.0, z: -20.0, color: [0.0, 1.0, 1.0] },
+            AgentMarker { x: 2.0, z: 2.0, outfit: [1.0, 0.0, 0.0], skin: [0.9, 0.8, 0.7], accent: [1.0, 1.0, 0.0] },
+            AgentMarker { x: 30.0, z: -20.0, outfit: [0.0, 1.0, 1.0], skin: [0.9, 0.8, 0.7], accent: [1.0, 1.0, 0.0] },
         ];
         let markers = [GroundMarker { x: 10.0, z: 10.0, color: [1.0, 0.0, 1.0], size: 1.2 }];
         let paths = [PathLine {
@@ -806,17 +839,17 @@ mod tests {
         use crate::camera::OrbitCamera;
         let cam = OrbitCamera::default();
         let (_, base) = build_sorted_tris(&cam, ASPECT, &[], &[], &[], &[], &[], &[]);
-        let agents = [AgentMarker { x: 0.0, z: 0.0, color: [1.0, 0.0, 0.0] }];
+        let agents = [AgentMarker { x: 0.0, z: 0.0, outfit: [1.0, 0.0, 0.0], skin: [0.9, 0.8, 0.7], accent: [1.0, 1.0, 0.0] }];
         let markers = [GroundMarker { x: 5.0, z: 5.0, color: [0.0, 0.0, 1.0], size: 1.2 }];
         let paths = [PathLine { points: vec![[-8.0, 0.0], [0.0, 0.0], [8.0, 8.0]], width: 2.0, color: [1.0, 1.0, 1.0] }];
         let polys = [PathPoly { points: vec![[20.0, 0.0], [28.0, 0.0], [28.0, 8.0], [20.0, 8.0]], color: [1.0, 1.0, 0.0] }];
         let walls = [WallSeg { ax: -4.0, az: -4.0, bx: 4.0, bz: -4.0, height: 3.0, color: [0.9, 0.9, 0.9] }];
         let props = [PropBox { cx: 0.0, cz: 20.0, w: 1.2, h: 2.2, d: 1.2, color: [0.92, 0.92, 0.94] }];
         let (floats, n) = build_sorted_tris(&cam, ASPECT, &agents, &markers, &paths, &polys, &walls, &props);
-        // octahedron (8) + diamond (2) + ribbon (2 segments x 2) + fan (2)
+        // avatar (8 body + 8 head + 2 badge) + diamond (2) + ribbon (2 segments x 2) + fan (2)
         // + wall (8-long -> 4 chunks x (side + cap) + 1 facing end = 18)
         // + prop box (top + 2 facing sides = 6).
-        assert_eq!(n, base + 40);
+        assert_eq!(n, base + 50);
         assert_eq!(floats.len(), n * 18);
         assert!(floats.iter().all(|f| f.is_finite()));
     }
