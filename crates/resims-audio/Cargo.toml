@@ -1,0 +1,15 @@
+[package]
+name = "resims-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "resims audio - tiny generated UI blips (kira on desktop, silent stubs elsewhere)"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+kira.workspace = true

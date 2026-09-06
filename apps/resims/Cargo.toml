@@ -1,0 +1,45 @@
+[package]
+name = "resims-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "resims runner - Repose desktop/web/android, UI + 3D viewport + sim"
+default-run = "resims-desktop"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "resims-desktop"
+path = "src/main.rs"
+
+[package.metadata.android]
+package = "org.resims.app"
+apk_name = "resims"
+build_targets = ["aarch64-linux-android"]
+split_per_abi = true
+
+[package.metadata.android.application]
+label = "resims"
+fullscreen = false
+icon = "@mipmap/ic_launcher"
+
+[dependencies]
+repose-platform.workspace = true
+repose-core.workspace = true
+resims-ui.workspace = true
+resims-sim.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger.workspace = true
+log.workspace = true
+winit.workspace = true
+rlobkit-app-events.workspace = true

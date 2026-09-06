@@ -1,0 +1,36 @@
+[package]
+name = "resims-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "resims UI - citybuilder toolbar/windows/sim-time on Repose (no engine)"
+publish = false
+
+[dependencies]
+repose-core.workspace = true
+repose-ui.workspace = true
+repose-material.workspace = true
+repose-canvas.workspace = true
+repose-docking.workspace = true
+repose-platform.workspace = true
+repose-render-wgpu.workspace = true
+repose-text.workspace = true
+repose-app.workspace = true
+repose-tree.workspace = true
+resims-view3d.workspace = true
+resims-sim.workspace = true
+resims-audio.workspace = true
+game-utils.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+web-workers = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+log = "0.4"

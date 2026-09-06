@@ -1,0 +1,22 @@
+[package]
+name = "resims-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "resims headless simulation - bevy_ecs agents with needs and goals (no renderer)"
+publish = false
+
+[dependencies]
+bevy_ecs.workspace = true
+pathfinding.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+geo.workspace = true
+game-utils.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]

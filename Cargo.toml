@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+members = [
+    "./crates/resims-ui",
+    "./crates/resims-sim",
+    "./crates/resims-view3d",
+    "./crates/resims-audio",
+    "./apps/resims",
+]
+default-members = [
+    "./apps/resims",
+    "./crates/resims-ui",
+    "./crates/resims-sim",
+    "./crates/resims-view3d",
+    "./crates/resims-audio",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+repository = "https://github.com/mlm-games/resims"
+rust-version = "1.93"
+
+[workspace.dependencies]
+# Repose (pure-Repose stack: UI + platform + custom wgpu viewport, no engine)
+repose-core = "0.28"
+repose-ui = "0.28"
+repose-material = "0.28"
+repose-canvas = "0.28"
+repose-docking = "0.28"
+repose-platform = "0.28"
+repose-render-wgpu = { version = "0.28", default-features = false }
+repose-text = "0.28"
+repose-app = "0.28"
+repose-tree = "0.28"
+# NOTE: for dogfooding unreleased Repose, swap the above for path deps:
+# repose-core = { path = "../../repose/crates/repose-core" }
+# ... (same for the other repose-* crates)
+
+# 3D viewport: must match the wgpu that repose-render-wgpu builds against
+wgpu = "30"
+glam = "0.33"
+bytemuck = { version = "1", features = ["derive"] }
+kira = "0.12"
+
+# Headless sim (no renderer): ECS only, stays portable to full Bevy later
+bevy_ecs = "0.19"
+pathfinding = "4"
+rand = "0.9"
+rand_chacha = "0.9"
+geo = { version = "0.31", default-features = false }
+# Save/load: crash-safe RON store, versioning, platform dirs (native and wasm OPFS).
+# Path dep: the published game-utils 0.1.2 predates the save_store/storage
+# API (SaveManager-only); flip to a version dep once a newer release lands.
+# NOTE: for standalone clones, vendor or publish first (same caveat as the
+# repose path-swap note above).
+game-utils = { path = "../game-utils/crates/game-utils", version = "0.1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+wasm-bindgen = "0.2"
+winit = "0.30"
+android_logger = "0.15"
+rlobkit-app-events = { version = "0.5", features = ["jni-bridge"] }
+
+resims-ui = { path = "crates/resims-ui", version = "0.1.0" }
+resims-sim = { path = "crates/resims-sim", version = "0.1.0" }
+resims-view3d = { path = "crates/resims-view3d", version = "0.1.0" }
+resims-audio = { path = "crates/resims-audio", version = "0.1.0" }
