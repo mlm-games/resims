@@ -25,6 +25,10 @@ pub extern "C" fn android_main(android_app: winit::platform::android::activity::
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
+    if let Some(dir) = android_app.internal_data_path() {
+        game_utils::set_android_data_dir(dir.join("files"));
+    }
+
     rlobkit_app_events::insets::set_on_insets(Box::new(|insets| {
         let r = repose_core::locals::WindowInsets {
             top: insets.top,

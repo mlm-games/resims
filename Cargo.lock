@@ -3874,6 +3874,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "env_logger",
+ "game-utils",
  "log",
  "repose-core",
  "repose-platform",

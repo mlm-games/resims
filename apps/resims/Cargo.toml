@@ -40,6 +40,7 @@ wasm-bindgen.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger.workspace = true
+game-utils.workspace = true
 log.workspace = true
 winit.workspace = true
 rlobkit-app-events.workspace = true
